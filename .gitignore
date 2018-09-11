@@ -1,0 +1,7 @@
+*.elf
+*.hex
+*.img
+*.log
+*.o
+*.ppu
+release/

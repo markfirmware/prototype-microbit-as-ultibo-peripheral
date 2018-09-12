@@ -54,8 +54,15 @@ const
 
 type 
  TArrayOfByte = Array of Byte;
+ PMicroBitPeripheral = ^TMicroBitPeripheral;
+ TMicroBitPeripheral = record
+  AddressString:String;
+  ButtonCounter:Integer;
+  ButtonChordStarted:Boolean;
+ end;
 
 var 
+ MicroBitPeripherals:Array of TMicroBitPeripheral;
  ScanRxCount:Integer;
  BluetoothUartDeviceDescription:String;
  ScanCycleCounter:LongWord;
@@ -69,8 +76,6 @@ var
  UART0:PSerialDevice = Nil;
  KeyboardLoopHandle:TThreadHandle = INVALID_HANDLE_VALUE;
  ReadByteCounter:Integer;
- ButtonCounter:Integer;
- ButtonChordStarted:Boolean;
 
 function ReadByte:Byte; forward;
 
@@ -253,20 +258,6 @@ end;
 procedure HciCommand(OGF:byte; OCF:Word; Params:array of byte);
 begin
  HciCommand((OGF shl 10) or OCF,Params);
-end;
-
-procedure SetLEScanResponseData(Data:array of byte);
-var 
- Params:array of byte;
- Len:byte;
- i:integer;
-begin
- Len:=Min(Length(Data),31);
- SetLength(Params,Len + 1);
- Params[0]:=Len;
- for i:=0 to Len - 1 do
-  Params[i + 1]:=Data[i];
- HciCommand(OGF_LE_CONTROL,$09,Params);
 end;
 
 function EventReadFirstByte:Byte;
@@ -564,7 +555,7 @@ begin
      'Q' : SystemRestart(0);
      'R' :
           begin
-           RestoreBootFile('bluetooth-dev-bluetoothtest','config.txt');
+           RestoreBootFile('microbitdemo','config.txt');
            SystemRestart(0);
           end;
     end;
@@ -599,6 +590,29 @@ begin
  Result:=(Hi shl 8) or Lo;
 end;
 
+function FindOrMakeMicroBitPeripheral(NewAddressString:String):PMicroBitPeripheral;
+var 
+ I:Integer;
+begin
+ Result:=Nil;
+ for I:= 0 to High(MicroBitPeripherals) do
+  if MicroBitPeripherals[I].AddressString = NewAddressString then
+   Result:=@MicroBitPeripherals[I];
+ if Result = nil then
+  begin
+   SetLength(MicroBitPeripherals,Length(MicroBitPeripherals) + 1);
+   Result:=@MicroBitPeripherals[High(MicroBitPeripherals)];
+   with Result^ do
+    begin
+     AddressString:=NewAddressString;
+     ButtonCounter:=0;
+     ButtonChordStarted:=False;
+    end;
+   Log('');
+   Log(Format('detected new micro:bit peripheral %s',[NewAddressString]));
+  end;
+end;
+
 procedure ParseEvent;
 var 
  I:Integer;
@@ -613,6 +627,10 @@ var
  LeEventType:Byte;
  NewButtonCounter:Integer;
  ButtonMessage:String;
+ CounterByte:Byte;
+ MicroEventIndex:Integer;
+ MicroEvent:Byte;
+ MicroBitPeripheral:PMicroBitPeripheral;
 function GetByte:Byte;
 begin
  Result:=Event[GetByteIndex];
@@ -675,8 +693,9 @@ begin
  MfrHi:=GetByte;
  SignatureLo:=GetByte;
  SignatureHi:=GetByte;
- if (MainType = $ff) and (AsWord(MfrHi,MfrLo) = Word(ManufacturerTesting)) and (SignatureLo = $55) and (SignatureHi = $97) then
+ if (MainType = $ff) and (AsWord(MfrHi,MfrLo) = Word(ManufacturerTesting)) and (AsWord(SignatureHi,Signaturelo) = $9755) then
   begin
+   MicroBitPeripheral:=FindOrMakeMicroBitPeripheral(AddressString);
    GetByteIndex:=20;
    NewButtonCounter:=(GetByte - Ord('0'))*10;
    NewButtonCounter:=NewButtonCounter + (GetByte - Ord('0'));
@@ -685,28 +704,77 @@ begin
     begin
      S:=S + Char(GetByte);
     end;
-   if NewButtonCounter <> ButtonCounter then
+   if NewButtonCounter <> MicroBitPeripheral^.ButtonCounter then
     begin
-     ButtonCounter:=NewButtonCounter;
-     if not ButtonChordStarted then
+     MicroBitPeripheral^.ButtonCounter:=NewButtonCounter;
+     if not MicroBitPeripheral^.ButtonChordStarted then
       begin
        LoggingOutput('');
-       ButtonChordStarted:=True;
+       MicroBitPeripheral^.ButtonChordStarted:=True;
       end;
      case S[1] of 
       '0':
           begin
            ButtonMessage:='Released    ';
-           ButtonChordStarted:=False;
+           MicroBitPeripheral^.ButtonChordStarted:=False;
           end;
       '1': ButtonMessage:='A down      ';
       '2': ButtonMessage:='B down      ';
       '3': ButtonMessage:='A and B down';
       else ButtonMessage:='????????????';
      end;
-     LoggingOutput(Format('micro:bit addr %s %s - %02.2d events, history: %s',[AddressString,ButtonMessage,ButtonCounter,S]));
+     LoggingOutput(Format('micro:bit addr %s %s - %02.2d events, history: %s',[AddressString,ButtonMessage,MicroBitPeripheral^.ButtonCounter,S]));
     end;
-  end;
+  end
+ else if (MainType = $ff) and (AsWord(MfrHi,MfrLo) = Word(ManufacturerTesting)) and (AsWord(SignatureHi,SignatureLo) = $9855) then
+       begin
+        MicroBitPeripheral:=FindOrMakeMicroBitPeripheral(AddressString);
+        GetByteIndex:=20;
+        CounterByte:=GetByte;
+        NewbuttonCounter:=CounterByte and $7f;
+        S:='';
+        while GetByteIndex <= High(Event) do
+         S:=S + Char(Ord('0') + (GetByte shr 6));
+        while (MicroBitPeripheral^.ButtonCounter mod 128) <> NewButtonCounter do
+         begin
+          Inc(MicroBitPeripheral^.ButtonCounter);
+          MicroEventIndex:=NewButtonCounter - (MicroBitPeripheral^.ButtonCounter mod 128);
+          // Log(Format('counter %d new %d index %d %s',[MicroBitPeripheral^.ButtonCounter,NewButtonCounter,MicroEventIndex,S]));
+          if MicroEventIndex < 0 then
+           Inc(MicroEventIndex,128);
+          if MicroEventIndex >= 21 then
+           begin
+            Log(Format('unable to reconstruct event %d index %d from %d %s',[MicroBitPeripheral^.ButtonCounter,MicroEventIndex,NewButtonCounter,S]));
+            if (CounterByte and $80) = 0 then
+             begin
+              MicroBitPeripheral^.ButtonCounter:=NewButtonCounter;
+              Log('the micro:bit seems to have restarted');
+             end;
+           end
+          else
+           begin
+            GetByteIndex:=21 + MicroEventIndex;
+            if not MicroBitPeripheral^.ButtonChordStarted then
+             begin
+              LoggingOutput('');
+              MicroBitPeripheral^.ButtonChordStarted:=True;
+             end;
+            MicroEvent:=GetByte shr 6;
+            case MicroEvent of 
+             0:
+               begin
+                ButtonMessage:='Released    ';
+                MicroBitPeripheral^.ButtonChordStarted:=False;
+               end;
+             1: ButtonMessage:='A down      ';
+             2: ButtonMessage:='B down      ';
+             3: ButtonMessage:='A and B down';
+             else ButtonMessage:='????????????';
+            end;
+            LoggingOutput(Format('micro:bit addr %s event number %03.3d %s - history: %s',[AddressString,MicroBitPeripheral^.ButtonCounter,ButtonMessage,S]));
+           end;
+         end;
+       end;
 end;
 
 begin
@@ -734,8 +802,7 @@ begin
  Log('Init complete');
  ScanCycleCounter:=0;
  ReadByteCounter:=0;
- ButtonCounter:=0;
- ButtonChordStarted:=False;
+ SetLength(MicroBitPeripherals,0);
  while True do
   begin
    ReadBackLog:=0;

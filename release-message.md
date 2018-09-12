@@ -1,4 +1,4 @@
-# Ultibo prototype-microbit-as-ultibo-peripheral repository
+# prototype-microbit-as-ultibo-peripheral
 
 # Requires:
 * a micro:bit computer and a usb cable
@@ -20,6 +20,7 @@
     * attach the microbit to the computer with the usb cable
     * the microbit should appear as a usb folder
     * copy microbit-as-ultibo-peripheral.hex from the sd card to the microbit usb folder
+    * safely eject the sd card
 * insert the sd card into the pi
 * connect the pi to the tv using the hdmi cable
 * connect the pi to the optional usb keyboard

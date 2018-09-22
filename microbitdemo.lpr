@@ -6,12 +6,12 @@ uses
 {$ifdef BUILD_RPI2} BCM2709,BCM2836, {$endif}
 {$ifdef BUILD_RPI3} BCM2710,BCM2837, {$endif}
 GlobalConfig,GlobalConst,GlobalTypes,Platform,Threads,SysUtils,Classes,Console,Logging,Ultibo,
-Serial,DWCOTG,FileSystem,MMC,FATFS,Keyboard,bcmfw;
+Serial,DWCOTG,FileSystem,MMC,FATFS,Keyboard,bcmfw,USBCDCACM;
 
 const 
  ScanUnitsPerSecond          = 1600;
- ScanInterval                = 1.000;
- ScanWindow                  = 0.250;
+ ScanInterval                = 0.800;
+ ScanWindow                  = 0.400;
 
  HCI_COMMAND_PKT             = $01;
  HCI_EVENT_PKT               = $04;
@@ -54,15 +54,26 @@ const
 
 type 
  TArrayOfByte = Array of Byte;
+ PLocomotive = ^TLocomotive;
  PMicroBitPeripheral = ^TMicroBitPeripheral;
  TMicroBitPeripheral = record
   AddressString:String;
   ButtonCounter:Integer;
-  ButtonChordStarted:Boolean;
+  TimeAtLastReception:LongWord;
+  CarrierLost:Boolean;
+  SelectionString:String;
+  Locomotive:PLocomotive;
+ end;
+ TLocomotive = record
+  Id:Integer;
+  Velocity:Integer;
+  Peripheral:PMicroBitPeripheral;
  end;
 
 var 
+ Console1,Console2,Console3:TWindowHandle;
  MicroBitPeripherals:Array of TMicroBitPeripheral;
+ Locomotives:Array of TLocomotive;
  ScanRxCount:Integer;
  BluetoothUartDeviceDescription:String;
  ScanCycleCounter:LongWord;
@@ -260,6 +271,110 @@ begin
  HciCommand((OGF shl 10) or OCF,Params);
 end;
 
+procedure CullMicroBitPeripherals;
+var 
+ I,J:Integer;
+ Now:LongWord;
+begin
+ Now:=GetTickCount;
+ for I:=High(MicroBitPeripherals) downto 0 do
+  with MicroBitPeripherals[I] do
+   begin
+    if not CarrierLost and (LongWord(Now - TimeAtLastReception) >= 2*1000) then
+     begin
+      CarrierLost:=True;
+      Log(Format('**** micro:bit ble %s carrier lost - warning',[AddressString]));
+     end
+    else if CarrierLost and (LongWord(Now - TimeAtLastReception) >= 4*1000) then
+          begin
+           Log(Format('**** micro:bit ble %s carrier lost - removed from active list',[AddressString]));
+           for J:=0 to High(Locomotives) do
+            if Locomotives[J].Peripheral = @MicroBitPeripherals[I] then
+             Locomotives[J].Peripheral:=Nil;
+           for J:=I + 1 to High(MicroBitPeripherals) do
+            MicroBitPeripherals[J - 1]:=MicroBitPeripherals[J];
+           SetLength(MicroBitPeripherals,Length(MicroBitPeripherals) - 1);
+          end;
+   end;
+end;
+
+function ButtonStringForInteger(Id:Integer):String;
+var 
+ I:Integer;
+begin
+ Result:='';
+ for I:=3 downto 0 do
+  if ((Id shr I) and $01) = 0 then
+   Result:=Result + 'A'
+  else
+   Result:=Result + 'B';
+end;
+
+procedure Console2WriteLn(Line:string);
+begin
+ ConsoleWindowWrite(Console2,Line);
+ ConsoleWindowClearEx(Console2,ConsoleWindowGetX(Console2),ConsoleWindowGetY(Console2),ConsoleWindowGetMaxX(Console2),ConsoleWindowGetY(Console2),False);
+ ConsoleWindowWriteLn(Console2,'');
+end;
+
+procedure Console2SetForecolor(Color:LongWord);
+begin
+ ConsoleWindowSetForecolor(Console2,Color);
+end;
+
+procedure EndOfScan;
+var 
+ I:Integer;
+ Line:string;
+ MotionString,OperatorString:string;
+begin
+ Console2SetForecolor(COLOR_ORANGE);
+ CullMicroBitPeripherals;
+ ConsoleWindowSetXY(Console2,1,1);
+ Console2WriteLn(Format('Ultibo locomotives implemented by this %s',[BoardTypeToString(BoardGetType)]));
+ for I:=0 to High(Locomotives) do
+  with Locomotives[I] do
+   begin
+    if Velocity = 0 then
+     Console2SetForecolor(COLOR_WHITE)
+    else if Velocity > 0 then
+          Console2SetForecolor(COLOR_GREEN)
+    else
+     Console2SetForecolor(COLOR_RED);
+    MotionString:=Format('%4d%% throttle',[Velocity]);
+    if Peripheral = nil then
+     begin
+      Console2SetForecolor(COLOR_GRAY);
+      OperatorString:=Format('Available (select %s)',[ButtonStringForInteger(Id)]);
+     end
+    else
+     OperatorString:=Format('micro:bit operator %s',[Peripheral^.AddressString]);
+    Console2WriteLn(Format('%02.2d %-19s %s',[Id,MotionString,OperatorString]))
+   end;
+ Console2SetForecolor(COLOR_YELLOW);
+ Console2WriteLn(Format('',[]));
+ Console2WriteLn(Format('micro:bit operators detected',[]));
+ for I:=0 to High(MicroBitPeripherals) do
+  begin
+   // LineFormat:=Format('%%7s %%%dd %%s %%s',[CounterWidth]);
+   // Line:=Format(LineFormat,[dBm(Last.Rssi),Count,Key,Last.Data]);
+   with MicroBitPeripherals[I] do
+    begin
+     if ButtonCounter <= 7 then
+      Line:=Format('%s selecting locomotive ... press a or b ... %s',[AddressString,SelectionString])
+     else if Locomotive <> nil then
+           Line:=Format('%s operating locomotive %02.2d',[AddressString,Locomotive^.Id])
+     else
+      Line:=Format('%s cannot engage - must restart micro:bit to engage with this device',[AddressString]);
+     Console2WriteLn(Line);
+    end;
+  end;
+ Console2SetForecolor(COLOR_WHITE);
+ Console2WriteLn(Format('',[]));
+ Console2WriteLn(Format('screen refreshed after every ble scan interval (%5.3f seconds) - (scan window is %5.3f seconds)',[ScanInterval,ScanWindow]));
+ ConsoleWindowClearEx(Console2,ConsoleWindowGetX(Console2),ConsoleWindowGetY(Console2),ConsoleWindowGetMaxX(Console2),ConsoleWindowGetMaxY(Console2),False);
+end;
+
 function EventReadFirstByte:Byte;
 var 
  c:LongWord;
@@ -299,6 +414,7 @@ begin
       begin
        ScanIdle:=True;
        Inc(ScanCycleCounter);
+       EndOfScan;
       end;
      ThreadYield;
     end;
@@ -383,7 +499,7 @@ begin
  UART0:=SerialDeviceFindByDescription(BluetoothUartDeviceDescription);
  if UART0 = nil then
   begin
-   Log('Can''t find UART0');
+   Log('Cannot find UART0');
    exit;
   end;
  if BoardGetType = BOARD_TYPE_RPI_ZERO_W then
@@ -468,7 +584,7 @@ begin
  LOGGING_INCLUDE_COUNTER:=False;
  LOGGING_INCLUDE_TICKCOUNT:=True;
  CONSOLE_REGISTER_LOGGING:=True;
- CONSOLE_LOGGING_POSITION:=CONSOLE_POSITION_FULL;
+ CONSOLE_LOGGING_POSITION:=CONSOLE_POSITION_BOTTOMRIGHT;
  LoggingConsoleDeviceAdd(ConsoleDeviceGetDefault);
  LoggingDeviceSetDefault(LoggingDeviceFindByType(LOGGING_TYPE_CONSOLE));
 end;
@@ -606,11 +722,28 @@ begin
     begin
      AddressString:=NewAddressString;
      ButtonCounter:=0;
-     ButtonChordStarted:=False;
+     CarrierLost:=False;
+     SelectionString:='';
+     Locomotive:=Nil;
     end;
-   Log('');
-   Log(Format('detected new micro:bit peripheral %s',[NewAddressString]));
+   Log(Format('**** micro:bit ble %s newly detected',[NewAddressString]));
   end;
+end;
+
+procedure AssignOperator(ThisPeripheral:PMicroBitPeripheral);
+var 
+ I:Integer;
+begin
+ with ThisPeripheral^ do
+  for I:=0 to High(Locomotives) do
+   with Locomotives[I] do
+    if (Peripheral = nil) and (SelectionString = ButtonStringForInteger(Id)) then
+     begin
+      Peripheral:=ThisPeripheral;
+      SelectionString:='';
+      Locomotive:=@Locomotives[I];
+      break;
+     end;
 end;
 
 procedure ParseEvent;
@@ -622,7 +755,7 @@ var
  S:string;
  GetByteIndex:Integer;
  AddressString:string;
- MainType,MfrLo,MfrHi,SignatureLo,SignatureHi:Byte;
+ MainType,MfrLo,MfrHi,SignatureLo,SignatureHi,SignatureAnother:Byte;
  AddressBytes:array[0 .. 5] of Byte;
  LeEventType:Byte;
  NewButtonCounter:Integer;
@@ -631,10 +764,39 @@ var
  MicroEventIndex:Integer;
  MicroEvent:Byte;
  MicroBitPeripheral:PMicroBitPeripheral;
+ LogMarker:String;
+ EventByte:Byte;
+ Chord:LongWord;
+ ChordDiscarded:Boolean;
+ ChordDiscardedString:String;
+ Mask,Keep:LongWord;
 function GetByte:Byte;
 begin
  Result:=Event[GetByteIndex];
  Inc(GetByteIndex);
+end;
+function IsChord(Pattern:Array of Byte):Boolean;
+var 
+ I:Integer;
+ X:LongWord;
+function Bits:Byte;
+begin
+ Result:=(X shr 30) and $03;
+end;
+begin
+ Result:=True;
+ X:=Chord;
+ if Bits <> 0 then
+  Result:=False;
+ X:=X shl 2;
+ for I:=0 to High(Pattern) do
+  begin
+   if Bits <> Pattern[I] then
+    Result:=False;
+   X:=X shl 2;
+  end;
+ if Bits <> 0 then
+  Result:=False;
 end;
 begin
  EventType:=EventReadFirstByte;
@@ -693,97 +855,186 @@ begin
  MfrHi:=GetByte;
  SignatureLo:=GetByte;
  SignatureHi:=GetByte;
- if (MainType = $ff) and (AsWord(MfrHi,MfrLo) = Word(ManufacturerTesting)) and (AsWord(SignatureHi,Signaturelo) = $9755) then
+ SignatureAnother:=GetByte;
+ if (MainType = $ff) and (AsWord(MfrHi,MfrLo) = Word(ManufacturerTesting)) and (AsWord(SignatureHi,SignatureLo) = $9755) then
   begin
-   MicroBitPeripheral:=FindOrMakeMicroBitPeripheral(AddressString);
-   GetByteIndex:=20;
-   NewButtonCounter:=(GetByte - Ord('0'))*10;
-   NewButtonCounter:=NewButtonCounter + (GetByte - Ord('0'));
-   S:='';
-   while GetByteIndex <= High(Event) do
-    begin
-     S:=S + Char(GetByte);
-    end;
-   if NewButtonCounter <> MicroBitPeripheral^.ButtonCounter then
-    begin
-     MicroBitPeripheral^.ButtonCounter:=NewButtonCounter;
-     if not MicroBitPeripheral^.ButtonChordStarted then
-      begin
-       LoggingOutput('');
-       MicroBitPeripheral^.ButtonChordStarted:=True;
-      end;
-     case S[1] of 
-      '0':
-          begin
-           ButtonMessage:='Released    ';
-           MicroBitPeripheral^.ButtonChordStarted:=False;
-          end;
-      '1': ButtonMessage:='A down      ';
-      '2': ButtonMessage:='B down      ';
-      '3': ButtonMessage:='A and B down';
-      else ButtonMessage:='????????????';
-     end;
-     LoggingOutput(Format('micro:bit addr %s %s - %02.2d events, history: %s',[AddressString,ButtonMessage,MicroBitPeripheral^.ButtonCounter,S]));
-    end;
   end
  else if (MainType = $ff) and (AsWord(MfrHi,MfrLo) = Word(ManufacturerTesting)) and (AsWord(SignatureHi,SignatureLo) = $9855) then
        begin
+       end
+ else if (MainType = $ff) and (AsWord(MfrHi,MfrLo) = Word(ManufacturerTesting)) and (SignatureLo = $78) and (SignatureHi = $f3) and (SignatureAnother = $c7) then
+       begin
         MicroBitPeripheral:=FindOrMakeMicroBitPeripheral(AddressString);
-        GetByteIndex:=20;
+        MicroBitPeripheral^.TimeAtLastReception:=GetTickCount;
+        if MicroBitPeripheral^.CarrierLost then
+         begin
+          MicroBitPeripheral^.CarrierLost:=False;
+          Log(Format('**** micro:bit ble %s carrier restored',[AddressString]));
+         end;
+        GetByteIndex:=21;
         CounterByte:=GetByte;
         NewbuttonCounter:=CounterByte and $7f;
         S:='';
         while GetByteIndex <= High(Event) do
-         S:=S + Char(Ord('0') + (GetByte shr 6));
+         begin
+          EventByte:=GetByte;
+          S:=S + Char(Ord('0') + ((EventByte shr 6) and $03));
+          S:=S + Char(Ord('0') + ((EventByte shr 4) and $03));
+          S:=S + Char(Ord('0') + ((EventByte shr 2) and $03));
+          S:=S + Char(Ord('0') + ((EventByte shr 0) and $03));
+         end;
         while (MicroBitPeripheral^.ButtonCounter mod 128) <> NewButtonCounter do
          begin
           Inc(MicroBitPeripheral^.ButtonCounter);
+          LogMarker:='    ';
           MicroEventIndex:=NewButtonCounter - (MicroBitPeripheral^.ButtonCounter mod 128);
-          // Log(Format('counter %d new %d index %d %s',[MicroBitPeripheral^.ButtonCounter,NewButtonCounter,MicroEventIndex,S]));
+          //Log(Format('counter %d new %d index %d %s',[MicroBitPeripheral^.ButtonCounter,NewButtonCounter,MicroEventIndex,S]));
           if MicroEventIndex < 0 then
            Inc(MicroEventIndex,128);
-          if MicroEventIndex >= 21 then
+          if MicroEventIndex >= 80 then
            begin
-            Log(Format('unable to reconstruct event %d index %d from %d %s',[MicroBitPeripheral^.ButtonCounter,MicroEventIndex,NewButtonCounter,S]));
+            Log(Format('**** micro:bit ble %s unable to determine event %d',[MicroBitPeripheral^.AddressString,MicroBitPeripheral^.ButtonCounter]));
             if (CounterByte and $80) = 0 then
              begin
               MicroBitPeripheral^.ButtonCounter:=NewButtonCounter;
-              Log('the micro:bit seems to have restarted');
+              MicroBitPeripheral^.SelectionString:='';
+              if MicroBitPeripheral^.Locomotive <> nil then
+               begin
+                MicroBitPeripheral^.Locomotive^.Peripheral := Nil;
+                MicroBitPeripheral^.Locomotive^.Velocity := 0;
+                MicroBitPeripheral^.Locomotive:=Nil;
+               end;
+              Log(Format('**** micro:bit ble %s seems to have restarted',[Addressstring]));
              end;
            end
           else
            begin
-            GetByteIndex:=21 + MicroEventIndex;
-            if not MicroBitPeripheral^.ButtonChordStarted then
-             begin
-              LoggingOutput('');
-              MicroBitPeripheral^.ButtonChordStarted:=True;
-             end;
-            MicroEvent:=GetByte shr 6;
-            case MicroEvent of 
-             0:
-               begin
-                ButtonMessage:='Released    ';
-                MicroBitPeripheral^.ButtonChordStarted:=False;
-               end;
-             1: ButtonMessage:='A down      ';
-             2: ButtonMessage:='B down      ';
-             3: ButtonMessage:='A and B down';
-             else ButtonMessage:='????????????';
+            GetByteIndex:=22 + MicroEventIndex div 4;
+            Chord:=GetByte;
+            Chord:=(Chord shl 8) or GetByte;
+            Chord:=(Chord shl 8) or GetByte;
+            Chord:=(Chord shl 8) or GetByte;
+            case MicroEventIndex mod 4 of 
+             0: Chord:=Chord shl 0;
+             1: Chord:=Chord shl 2;
+             2: Chord:=Chord shl 4;
+             3: Chord:=Chord shl 6;
             end;
-            LoggingOutput(Format('micro:bit addr %s event number %03.3d %s - history: %s',[AddressString,MicroBitPeripheral^.ButtonCounter,ButtonMessage,S]));
+            case ((Chord shr 30) and $03)  of 
+             0:
+               ButtonMessage:='Released    ';
+             1:
+               ButtonMessage:='A down      ';
+             2:
+               ButtonMessage:='B down      ';
+             3:
+               ButtonMessage:='A and B down';
+             else
+              ButtonMessage:='????????????';
+            end;
+            LoggingOutput(Format('%s micro:bit ble %s event number %03.3d %s',[LogMarker,AddressString,MicroBitPeripheral^.ButtonCounter,ButtonMessage]));
+            if ((Chord shr 30) and $03) = 0 then
+             begin
+              Mask:=$30000000;
+              Keep:=$c0000000;
+              while Mask <> 0 do
+               begin
+                if (Chord and Mask) = 0 then
+                 begin
+                  Chord:=Chord and Keep;
+                  break;
+                 end
+                else
+                 begin
+                  Mask:=Mask shr 2;
+                  Keep:=(Keep shr 2) or $c0000000;
+                 end;
+               end;
+              ChordDiscarded:=True;
+              if MicroBitPeripheral^.Locomotive = nil then
+               begin
+                if (Length(MicroBitPeripheral^.SelectionString) < 4) and IsChord([$1]) then
+                 begin
+                  MicroBitPeripheral^.SelectionString:=MicroBitPeripheral^.SelectionString + 'A';
+                  AssignOperator(MicroBitPeripheral);
+                  ChordDiscarded:=False;
+                 end;
+                if (Length(MicroBitPeripheral^.SelectionString) < 4) and IsChord([$2]) then
+                 begin
+                  MicroBitPeripheral^.SelectionString:=MicroBitPeripheral^.SelectionString + 'B';
+                  AssignOperator(MicroBitPeripheral);
+                  ChordDiscarded:=False;
+                 end;
+                if (Length(MicroBitPeripheral^.SelectionString) < 4) and IsChord([$3]) then
+                 begin
+                  MicroBitPeripheral^.SelectionString:='????';
+                  AssignOperator(MicroBitPeripheral);
+                  ChordDiscarded:=False;
+                 end;
+               end
+              else
+               begin
+                if IsChord([$1,$3,$2]) then
+                 begin
+                  MicroBitPeripheral^.Locomotive^.Velocity:=0;
+                  ChordDiscarded:=False;
+                 end;
+                if IsChord([$2]) then
+                 begin
+                  Inc(MicroBitPeripheral^.Locomotive^.Velocity,1);
+                  ChordDiscarded:=False;
+                 end;
+                if IsChord([$1]) then
+                 begin
+                  Dec(MicroBitPeripheral^.Locomotive^.Velocity,1);
+                  ChordDiscarded:=False;
+                 end;
+               end;
+              if ChordDiscarded then
+               ChordDiscardedString:='discarded'
+              else
+               ChordDiscardedString:='ok';
+              Log(Format('**** micro:bit ble %s chord %04.4x %s',[Addressstring,Chord,ChordDiscardedString]));
+             end;
            end;
          end;
-       end;
+       end
 end;
 
+var 
+ I:Integer;
+
 begin
+ Console1 := ConsoleWindowCreate(ConsoleDeviceGetDefault,CONSOLE_POSITION_TOPRIGHT,True);
+ Console2 := ConsoleWindowCreate(ConsoleDeviceGetDefault,CONSOLE_POSITION_TOPLEFT,False);
+ Console3 := ConsoleWindowCreate(ConsoleDeviceGetDefault,CONSOLE_POSITION_BOTTOMLEFT,False);
+ ConsoleWindowSetBackcolor(Console2,COLOR_BLACK);
+ ConsoleWindowSetForecolor(Console2,COLOR_YELLOW);
+ ConsoleWindowSetBackcolor(Console3,COLOR_CYAN);
+ ConsoleWindowSetForecolor(Console3,COLOR_WHITE);
+ ConsoleWindowClear(Console2);
+ ConsoleWindowClear(Console3);
+
  RestoreBootFile('default','config.txt');
  StartLogging;
  Log('prototype-microbit-as-ultibo-peripheral');
 
  BeginThread(@KeyboardLoop,Nil,KeyboardLoopHandle,THREAD_STACK_DEFAULT_SIZE);
  Help;
+
+ SetLength(MicroBitPeripherals,0);
+ SetLength(Locomotives,0);
+ for I:=1 to 5 do
+  begin
+   SetLength(Locomotives,Length(Locomotives) + 1);
+   with Locomotives[High(Locomotives)] do
+    begin
+     Id:=I;
+     Velocity:=0;
+     Peripheral:=Nil;
+    end;
+  end;
+ EndOfScan;
 
  if IsBlueToothAvailable then
   begin
@@ -802,7 +1053,6 @@ begin
  Log('Init complete');
  ScanCycleCounter:=0;
  ReadByteCounter:=0;
- SetLength(MicroBitPeripherals,0);
  while True do
   begin
    ReadBackLog:=0;

@@ -4,9 +4,9 @@ const int8_t CALIBRATED_POWERS[] = {-49, -37, -33, -28, -25, -20, -15, -10};
 uint8_t advertising = 0;
 uint8_t tx_power_level = 6;
 uint8_t AdvData [26] = {0xff, 0xff,
-                        0x55, 0x98,
+                        0x78, 0xf3, 0xc7,
                         0,
-                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 uint8_t buttonsState = 0;
 uint8_t eventCounter = 0;
 
@@ -26,7 +26,7 @@ void startAdvertising()
     uBit.bleManager.ble->accumulateAdvertisingPayload(GapAdvertisingData::BREDR_NOT_SUPPORTED | GapAdvertisingData::LE_GENERAL_DISCOVERABLE);
     uBit.bleManager.ble->accumulateAdvertisingPayload(GapAdvertisingData::MANUFACTURER_SPECIFIC_DATA, AdvData, sizeof(AdvData));
     uBit.bleManager.ble->startAdvertising();
-    uBit.display.printAsync("ULTIBO 98", 200);
+    uBit.display.printAsync("ULTIBO C7", 200);
     advertising = 1;
     }
 
@@ -34,12 +34,12 @@ void updatePayload ()
     {
     uBit.bleManager.ble->clearAdvertisingPayload();
     uBit.bleManager.ble->accumulateAdvertisingPayload(GapAdvertisingData::BREDR_NOT_SUPPORTED | GapAdvertisingData::LE_GENERAL_DISCOVERABLE);
-    AdvData [4] = eventCounter;
-    for (int i = 20; i >= 1; i--)
+    AdvData [5] = eventCounter;
+    for (int i = 19; i >= 1; i--)
         {
-        AdvData [i + 5] = AdvData [i + 5 - 1];
+        AdvData [i + 6] = ((AdvData [i + 6] >> 2) & 0x3f) | ((AdvData [i + 6 - 1] & 0x03) << 6);
         }
-    AdvData [5] = (buttonsState << 6);
+    AdvData [6] = ((AdvData [6] >> 2) & 0x3f) | (buttonsState << 6);
     uBit.bleManager.ble->accumulateAdvertisingPayload(GapAdvertisingData::MANUFACTURER_SPECIFIC_DATA, AdvData, sizeof(AdvData));
     }
 

@@ -82,14 +82,11 @@ void onButton(MicroBitEvent e)
 
     if (buttonsState != prev)
         {
-        if (eventCounter == 255)
+        eventCounter = eventCounter + 1;
+        if (eventCounter == 0)
             {
             eventCounter = 128;
             }
-        else
-           {
-           eventCounter = eventCounter + 1;
-           }
         switch (buttonsState)
             {
             case 0:  text [0] = ' ';

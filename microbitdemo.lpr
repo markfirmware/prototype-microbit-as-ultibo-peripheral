@@ -6,9 +6,11 @@ uses
 {$ifdef BUILD_RPI2} BCM2709,BCM2836, {$endif}
 {$ifdef BUILD_RPI3} BCM2710,BCM2837, {$endif}
 GlobalConfig,GlobalConst,GlobalTypes,Platform,Threads,SysUtils,Classes,Console,Logging,Ultibo,
-Serial,DWCOTG,FileSystem,MMC,FATFS,Keyboard,bcmfw,USBCDCACM;
+Serial,DWCOTG,FileSystem,MMC,FATFS,Keyboard,bcmfw,GPIO,PWM,RPiGPIOExpander,Services,Math;
 
 const 
+ PwmRange                    = 1000;
+ BoostDuration               = 20;
  ScanUnitsPerSecond          = 1600;
  ScanInterval                = 0.800;
  ScanWindow                  = 0.400;
@@ -58,20 +60,23 @@ type
  PMicroBitPeripheral = ^TMicroBitPeripheral;
  TMicroBitPeripheral = record
   AddressString:String;
-  ButtonCounter:Integer;
+  ButtonCounter:LongWord;
   TimeAtLastReception:LongWord;
   CarrierLost:Boolean;
-  SelectionString:String;
+  //  SelectionString:String;
   Locomotive:PLocomotive;
  end;
  TLocomotive = record
   Id:Integer;
-  Velocity:Integer;
+  ButtonThrottleCounter:Integer;
+  CommandedThrottle:Integer;
   Peripheral:PMicroBitPeripheral;
+  PwmLoopHandle:TThreadHandle;
  end;
 
 var 
  Console1,Console2,Console3:TWindowHandle;
+ LedRequest:Integer;
  MicroBitPeripherals:Array of TMicroBitPeripheral;
  Locomotives:Array of TLocomotive;
  ScanRxCount:Integer;
@@ -85,7 +90,11 @@ var
  HciSequenceNumber:Integer = 0;
  ch:char;
  UART0:PSerialDevice = Nil;
+ LedLoopHandle:TThreadHandle = INVALID_HANDLE_VALUE;
+ ButtonThrottleLoopHandle:TThreadHandle = INVALID_HANDLE_VALUE;
+ DemoLoopHandle:TThreadHandle = INVALID_HANDLE_VALUE;
  KeyboardLoopHandle:TThreadHandle = INVALID_HANDLE_VALUE;
+ SelfTestLoopHandle:TThreadHandle = INVALID_HANDLE_VALUE;
  ReadByteCounter:Integer;
 
 function ReadByte:Byte; forward;
@@ -271,6 +280,20 @@ begin
  HciCommand((OGF shl 10) or OCF,Params);
 end;
 
+procedure MicroBitPeripheralReset(MicroBitPeripheral:PMicroBitPeripheral;Message:String);
+begin
+ Log(Message);
+ MicroBitPeripheral^.ButtonCounter:=0;
+ // MicroBitPeripheral^.SelectionString:='';
+ if MicroBitPeripheral^.Locomotive <> nil then
+  begin
+   MicroBitPeripheral^.Locomotive^.Peripheral := Nil;
+   MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter := 0;
+   MicroBitPeripheral^.Locomotive^.CommandedThrottle := 0;
+   MicroBitPeripheral^.Locomotive:=Nil;
+  end;
+end;
+
 procedure CullMicroBitPeripherals;
 var 
  I,J:Integer;
@@ -285,9 +308,9 @@ begin
       CarrierLost:=True;
       Log(Format('**** micro:bit ble %s carrier lost - warning',[AddressString]));
      end
-    else if CarrierLost and (LongWord(Now - TimeAtLastReception) >= 4*1000) then
+    else if CarrierLost and (LongWord(Now - TimeAtLastReception) >= 2*1000) then
           begin
-           Log(Format('**** micro:bit ble %s carrier lost - removed from active list',[AddressString]));
+           MicroBitPeripheralReset(@MicroBitPeripherals[I],Format('**** micro:bit ble %s carrier lost - removed from active list',[AddressString]));
            for J:=0 to High(Locomotives) do
             if Locomotives[J].Peripheral = @MicroBitPeripherals[I] then
              Locomotives[J].Peripheral:=Nil;
@@ -335,13 +358,13 @@ begin
  for I:=0 to High(Locomotives) do
   with Locomotives[I] do
    begin
-    if Velocity = 0 then
+    if CommandedThrottle = 0 then
      Console2SetForecolor(COLOR_WHITE)
-    else if Velocity > 0 then
+    else if CommandedThrottle > 0 then
           Console2SetForecolor(COLOR_GREEN)
     else
      Console2SetForecolor(COLOR_RED);
-    MotionString:=Format('%4d%% throttle',[Velocity]);
+    MotionString:=Format('%4d%% throttle',[CommandedThrottle]);
     if Peripheral = nil then
      begin
       Console2SetForecolor(COLOR_GRAY);
@@ -360,10 +383,11 @@ begin
    // Line:=Format(LineFormat,[dBm(Last.Rssi),Count,Key,Last.Data]);
    with MicroBitPeripherals[I] do
     begin
-     if ButtonCounter <= 7 then
-      Line:=Format('%s selecting locomotive ... press a or b ... %s',[AddressString,SelectionString])
-     else if Locomotive <> nil then
-           Line:=Format('%s operating locomotive %02.2d',[AddressString,Locomotive^.Id])
+     //   if ButtonCounter <= 7 then
+     //    Line:=Format('%s selecting locomotive ... press a or b ... %s',[AddressString,SelectionString])
+     //   else
+     if Locomotive <> nil then
+      Line:=Format('%s operating locomotive %02.2d',[AddressString,Locomotive^.Id])
      else
       Line:=Format('%s cannot engage - must restart micro:bit to engage with this device',[AddressString]);
      Console2WriteLn(Line);
@@ -660,6 +684,187 @@ begin
  Log('');
 end;
 
+procedure SetThrottle(X:Integer);
+begin
+ Locomotives[0].CommandedThrottle:=X;
+end;
+
+procedure SleepPhase(RequestedPhase:Integer);
+//var 
+// Phase:Integer;
+begin
+ //Phase:=(ClockGetCount div 1000) Mod 10;
+ // while (Phase < RequestedPhase) or (Phase > RequestedPhase + 1) do
+ //  Sleep(1);
+end;
+
+function ButtonThrottleLoop(Parameter:Pointer):PtrInt;
+var 
+ BoostCounter:Integer;
+begin
+ Result:=0;
+ SleepPhase(0);
+ with Locomotives[0] do
+  while True do
+   begin
+    while ButtonThrottleCounter = 0 do
+     begin
+      SetThrottle(0);
+      Sleep(10);
+     end;
+    BoostCounter:= 0;
+    while (Abs(ButtonThrottleCounter) = 1) and (BoostCounter < BoostDuration) do
+     begin
+      SetThrottle(Sign(ButtonThrottleCounter)*Trunc(0.14*PwmRange));
+      Inc(BoostCounter);
+      Sleep(10);
+     end;
+    while ButtonThrottleCounter <> 0 do
+     begin
+      SetThrottle(Trunc(0.005*ButtonThrottleCounter*PwmRange));
+      Sleep(10);
+     end;
+   end;
+end;
+
+function DemoLoop(Parameter:Pointer):PtrInt;
+const 
+ CycleDutyPercent = 90;
+ Accel = 0.00005;
+var 
+ CyclesCompletedCounter:Integer;
+ CycleActive:Boolean;
+ CyclePeriodSeconds:Integer;
+ PhaseSeconds:Integer;
+ EndActiveSeconds,EndActiveSteps:Integer;
+ StepCounter:Integer;
+ NewThrottle:Integer;
+ ClockNow:Integer;
+begin
+ Result:=0;
+ CyclesCompletedCounter:=0;
+ CycleActive:=False;
+ CyclePeriodSeconds:=3*60;
+ SleepPhase(0);
+ while True do
+  begin
+   ClockNow:=ClockGetCount div (1000*1000) - 10;
+   EndActiveSeconds:=(CycleDutyPercent * CyclePeriodSeconds) div 100;
+   EndActiveSteps:=EndActiveSeconds*100;
+   PhaseSeconds:=ClockNow Mod CyclePeriodSeconds;
+   if not CycleActive and (PhaseSeconds = 0) then
+    begin
+     CycleActive:=True;
+     StepCounter:=0;
+    end;
+   if CycleActive then
+    begin
+     if PhaseSeconds <= EndActiveSeconds then
+      begin
+       if StepCounter < BoostDuration then
+        SetThrottle(Trunc(0.14*PwmRange))
+       else
+        begin
+         NewThrottle:=Min(Trunc(Accel*PwmRange*StepCounter),Trunc(0.90*PwmRange));
+         NewThrottle:=Min(NewThrottle,Trunc(Accel*PwmRange*(EndActiveSteps - StepCounter)));
+         NewThrottle:=Max(NewThrottle,0);
+         SetThrottle(NewThrottle);
+        end;
+      end
+     else
+      begin
+       CycleActive:=False;
+       SetThrottle(0);
+       Inc(CyclesCompletedCounter);
+      end;
+     Inc(StepCounter);
+    end;
+   Sleep(10);
+  end;
+end;
+
+function LedLoop(Parameter:Pointer):PtrInt;
+var 
+ InterruptLatched:Boolean;
+ IdleCounter:Integer;
+const 
+ Activity = 1;
+ Power = 2;
+
+function Interrupted:Boolean;
+begin
+ InterruptLatched:=InterruptLatched or (LedRequest <> 0);
+ Result:=InterruptLatched;
+end;
+
+procedure Led(Which:Integer;State:Integer;Cycles:Integer);
+begin
+ if not Interrupted then
+  begin
+   case which of 
+    Activity:
+             begin
+              if State = 1 then
+               ActivityLedOn
+              else
+               ActivityLedOff;
+             end;
+    Power:
+          begin
+           if State = 1 then
+            PowerLedOn
+           else
+            PowerLedOff;
+          end;
+   end;
+   while not Interrupted and (Cycles > 0) do
+    begin
+     Sleep(100);
+     Dec(Cycles);
+    end;
+  end;
+end;
+
+begin
+ Result:=0;
+ PowerLedEnable;
+ ActivityLedEnable;
+ while True do
+  begin
+   while not Interrupted do
+    begin
+     Led(Power,1,1);
+     Led(Power,0,1);
+     Led(Activity,1,1);
+     Led(Activity,0,7);
+    end;
+   IdleCounter:=0;
+   while Interrupted do
+    begin
+     if LedRequest <> 0 then
+      begin
+       IdleCounter:=0;
+       ActivityLedOn;
+       //     if (LedRequest and $1) <> 0 then
+       //      ActivityLedOn
+       //     else
+       //      ActivityLedOff;
+       if (LedRequest and $2) <> 0 then
+        PowerLedOn
+       else
+        PowerLedOff;
+      end
+     else
+      begin
+       Inc(IdleCounter);
+       if IdleCounter > 5 then
+        InterruptLatched:=False;
+      end;
+     Sleep(100);
+    end;
+  end;
+end;
+
 function KeyboardLoop(Parameter:Pointer):PtrInt;
 begin
  Result:=0;
@@ -723,7 +928,7 @@ begin
      AddressString:=NewAddressString;
      ButtonCounter:=0;
      CarrierLost:=False;
-     SelectionString:='';
+     //     SelectionString:='';
      Locomotive:=Nil;
     end;
    Log(Format('**** micro:bit ble %s newly detected',[NewAddressString]));
@@ -737,14 +942,132 @@ begin
  with ThisPeripheral^ do
   for I:=0 to High(Locomotives) do
    with Locomotives[I] do
-    if (Peripheral = nil) and (SelectionString = ButtonStringForInteger(Id)) then
+    //  if (Peripheral = nil) and (SelectionString = ButtonStringForInteger(Id)) then
+    if (Peripheral = nil) then
      begin
       Peripheral:=ThisPeripheral;
-      SelectionString:='';
+      //    SelectionString:='';
       Locomotive:=@Locomotives[I];
       break;
      end;
 end;
+
+function SelfTestLoop(Parameter:Pointer):PtrInt;
+var 
+ Pwm,Pin1,Pin2:Integer;
+ LastPin1,LastPin2:Integer;
+ PwmAccumulator,LastPwmAccumulator:Integer;
+ TimeCounter:Integer;
+begin
+ Result:=0;
+ LastPin1:=-1;
+ LastPin2:=-1;
+ PwmAccumulator:=0;
+ LastPwmAccumulator:=-1;
+ TimeCounter:=0;
+ while True do
+  begin
+   Pwm:=GPIOInputGet(GPIO_PIN_13);
+   Inc(PwmAccumulator,Pwm);
+   if TimeCounter >= 1000 then
+    begin
+     if PwmAccumulator <> LastPwmAccumulator then
+      begin
+       Log(Format('>>>> self test pwm accumulator %d',[PwmAccumulator]));
+       LastPwmAccumulator:=PwmAccumulator;
+      end;
+     PwmAccumulator:=0;
+     TimeCounter:=0;
+    end;
+   Pin1:=GPIOInputGet(GPIO_PIN_19);
+   Pin2:=GPIOInputGet(GPIO_PIN_26);
+   if (Pin1 <> LastPin1) or (Pin2 <> LastPin2) then
+    begin
+     Log(Format('>>>> self test changed pin1 %d pin2 %d',[Pin1,Pin2]));
+     LastPin1:=Pin1;
+     LastPin2:=Pin2;
+    end;
+   sleep(2);
+   Inc(TimeCounter,2);
+  end;
+end;
+
+function LocomotivePwmLoop(Locomotive:Pointer):PtrInt;
+var 
+ LastThrottle:Integer;
+ PwmBias,Pwm,LastPwm:Integer;
+ Pin1,Pin2:Integer;
+ PWM0Device:PPwmDevice;
+const 
+ PulseFrequency = 1000;
+begin
+ Result:=0;
+ try
+  LastThrottle:=0;
+  LastPwm:=-1;
+  //GPIOPullSelect(GPIO_PIN_12,GPIO_PULL_NONE);
+  //GPIOFunctionSelect(GPIO_PIN_12,GPIO_FUNCTION_ALT0);
+  GPIOPullSelect(GPIO_PIN_6,GPIO_PULL_NONE);
+  GPIOFunctionSelect(GPIO_PIN_6,GPIO_FUNCTION_OUT);
+  GPIOPullSelect(GPIO_PIN_16,GPIO_PULL_NONE);
+  GPIOFunctionSelect(GPIO_PIN_16,GPIO_FUNCTION_OUT);
+  //GPIOPullSelect(GPIO_PIN_13,GPIO_PULL_NONE);
+  //GPIOFunctionSelect(GPIO_PIN_13,GPIO_FUNCTION_IN);
+  //GPIOPullSelect(GPIO_PIN_19,GPIO_PULL_NONE);
+  //GPIOFunctionSelect(GPIO_PIN_19,GPIO_FUNCTION_IN);
+  //GPIOPullSelect(GPIO_PIN_26,GPIO_PULL_NONE);
+  //GPIOFunctionSelect(GPIO_PIN_26,GPIO_FUNCTION_IN);
+  PWM0Device:=PWMDeviceFindByName('PWM0');
+  PWMDeviceSetGPIO(PWM0Device,GPIO_PIN_12);
+  PWMDeviceSetRange(PWM0Device,PwmRange);
+  PWMDeviceSetMode(PWM0Device,PWM_MODE_MARKSPACE);
+  PWMDeviceSetFrequency(PWM0Device,PwmRange*PulseFrequency);
+  PWMDeviceStart(PWM0Device);
+  SleepPhase(5);
+  with PLocomotive(Locomotive)^ do
+   while True do
+    begin
+     if CommandedThrottle <> LastThrottle then
+      begin
+       if CommandedThrottle = 0 then
+        Pwm:=0
+       else
+        begin
+         if CommandedThrottle > 0 then
+          PwmBias:=Trunc(0.23*PwmRange)
+         else
+          PwmBias:=Trunc(0.26*PwmRange);
+         Pwm:=Min(Abs(CommandedThrottle) + PwmBias,PwmRange);
+        end;
+       Pin1:=GPIO_LEVEL_LOW;
+       Pin2:=GPIO_LEVEL_LOW;
+       if CommandedThrottle > 0 then
+        Pin1:=GPIO_LEVEL_HIGH
+       else if CommandedThrottle < 0 then
+             Pin2:=GPIO_LEVEL_HIGH;
+       Log(Format('locomotive %d throttle %d range %d pin1 %d pin2 %d',[Id,CommandedThrottle,Pwm,Pin1,Pin2]));
+       GPIOOutputSet(GPIO_PIN_6,Pin1);
+       GPIOOutputSet(GPIO_PIN_16,Pin2);
+       if Pwm <> LastPwm then
+        begin
+         PWMDeviceWrite(PWM0Device,Pwm);
+         LastPwm:=Pwm;
+        end;
+       LastThrottle:=CommandedThrottle;
+      end;
+     Sleep(10);
+    end;
+ except
+  on E:Exception do
+       begin
+        Log(Format('locomotive %d pwm exception %s',[E.Message]));
+       end;
+end;
+ThreadHalt(0);
+end;
+
+var 
+ HighWater:Integer;
 
 procedure ParseEvent;
 var 
@@ -758,14 +1081,14 @@ var
  MainType,MfrLo,MfrHi,SignatureLo,SignatureHi,SignatureAnother:Byte;
  AddressBytes:array[0 .. 5] of Byte;
  LeEventType:Byte;
- NewButtonCounter:Integer;
+ NewButtonCounter:LongWord;
  ButtonMessage:String;
  CounterByte:Byte;
  MicroEventIndex:Integer;
- MicroEvent:Byte;
  MicroBitPeripheral:PMicroBitPeripheral;
  LogMarker:String;
  EventByte:Byte;
+ CurrentButtons:Integer;
  Chord:LongWord;
  ChordDiscarded:Boolean;
  ChordDiscardedString:String;
@@ -799,6 +1122,7 @@ begin
   Result:=False;
 end;
 begin
+ NewButtonCounter:=0;
  EventType:=EventReadFirstByte;
  EventSubtype:=Readbyte;
  EventLength:=ReadByte;
@@ -873,128 +1197,151 @@ begin
          end;
         GetByteIndex:=21;
         CounterByte:=GetByte;
-        NewbuttonCounter:=CounterByte and $7f;
-        S:='';
-        while GetByteIndex <= High(Event) do
+        if (CounterByte and $80) = 0 then
+         NewButtonCounter:=CounterByte
+        else
          begin
-          EventByte:=GetByte;
-          S:=S + Char(Ord('0') + ((EventByte shr 6) and $03));
-          S:=S + Char(Ord('0') + ((EventByte shr 4) and $03));
-          S:=S + Char(Ord('0') + ((EventByte shr 2) and $03));
-          S:=S + Char(Ord('0') + ((EventByte shr 0) and $03));
+          NewbuttonCounter:=(MicroBitPeripheral^.ButtonCounter and $ffffff80) or (CounterByte and $7f);
+          if NewButtonCounter < MicroBitPeripheral^.ButtonCounter then
+           Inc(NewButtonCounter,128);
          end;
-        while (MicroBitPeripheral^.ButtonCounter mod 128) <> NewButtonCounter do
+        if NewButtonCounter < MicroBitPeripheral^.ButtonCounter then
          begin
-          Inc(MicroBitPeripheral^.ButtonCounter);
-          LogMarker:='    ';
-          MicroEventIndex:=NewButtonCounter - (MicroBitPeripheral^.ButtonCounter mod 128);
-          //Log(Format('counter %d new %d index %d %s',[MicroBitPeripheral^.ButtonCounter,NewButtonCounter,MicroEventIndex,S]));
-          if MicroEventIndex < 0 then
-           Inc(MicroEventIndex,128);
-          if MicroEventIndex >= 80 then
+          MicroBitPeripheralReset(MicroBitPeripheral,Format('**** micro:bit ble %s seems to have restarted',[Addressstring]));
+         end
+        else
+         begin
+          S:='';
+          while GetByteIndex <= High(Event) do
            begin
-            Log(Format('**** micro:bit ble %s unable to determine event %d',[MicroBitPeripheral^.AddressString,MicroBitPeripheral^.ButtonCounter]));
-            if (CounterByte and $80) = 0 then
+            EventByte:=GetByte;
+            S:=S + Char(Ord('0') + ((EventByte shr 6) and $03));
+            S:=S + Char(Ord('0') + ((EventByte shr 4) and $03));
+            S:=S + Char(Ord('0') + ((EventByte shr 2) and $03));
+            S:=S + Char(Ord('0') + ((EventByte shr 0) and $03));
+           end;
+          while MicroBitPeripheral^.ButtonCounter <> NewButtonCounter do
+           begin
+            Inc(MicroBitPeripheral^.ButtonCounter);
+            LogMarker:='    ';
+            MicroEventIndex:=NewButtonCounter - MicroBitPeripheral^.ButtonCounter;
+            if MicroEventIndex > HighWater then
              begin
-              MicroBitPeripheral^.ButtonCounter:=NewButtonCounter;
-              MicroBitPeripheral^.SelectionString:='';
-              if MicroBitPeripheral^.Locomotive <> nil then
-               begin
-                MicroBitPeripheral^.Locomotive^.Peripheral := Nil;
-                MicroBitPeripheral^.Locomotive^.Velocity := 0;
-                MicroBitPeripheral^.Locomotive:=Nil;
-               end;
-              Log(Format('**** micro:bit ble %s seems to have restarted',[Addressstring]));
+              HighWater:=MicroEventIndex;
+              Log(Format('high water now %ds',[HighWater]));
              end;
-           end
-          else
-           begin
-            GetByteIndex:=22 + MicroEventIndex div 4;
-            Chord:=GetByte;
-            Chord:=(Chord shl 8) or GetByte;
-            Chord:=(Chord shl 8) or GetByte;
-            Chord:=(Chord shl 8) or GetByte;
-            case MicroEventIndex mod 4 of 
-             0: Chord:=Chord shl 0;
-             1: Chord:=Chord shl 2;
-             2: Chord:=Chord shl 4;
-             3: Chord:=Chord shl 6;
-            end;
-            case ((Chord shr 30) and $03)  of 
-             0:
-               ButtonMessage:='Released    ';
-             1:
-               ButtonMessage:='A down      ';
-             2:
-               ButtonMessage:='B down      ';
-             3:
-               ButtonMessage:='A and B down';
-             else
-              ButtonMessage:='????????????';
-            end;
-            LoggingOutput(Format('%s micro:bit ble %s event number %03.3d %s',[LogMarker,AddressString,MicroBitPeripheral^.ButtonCounter,ButtonMessage]));
-            if ((Chord shr 30) and $03) = 0 then
+            //Log(Format('counter %d new %d index %d %s',[MicroBitPeripheral^.ButtonCounter,NewButtonCounter,MicroEventIndex,S]));
+            if MicroEventIndex >= 80 then
              begin
-              Mask:=$30000000;
-              Keep:=$c0000000;
-              while Mask <> 0 do
+              Log(Format('new button counter %d current index %d %s',[NewButtonCounter,MicroBitPeripheral^.ButtonCounter,MicroEventIndex,S]));
+              MicroBitPeripheralReset(MicroBitPeripheral,Format('**** micro:bit ble %s unable to determine event %d',[MicroBitPeripheral^.AddressString,MicroBitPeripheral^.ButtonCounter]));
+              Sleep(60*1000);
+             end
+            else
+             begin
+              GetByteIndex:=22 + MicroEventIndex div 4;
+              Chord:=GetByte;
+              Chord:=(Chord shl 8) or GetByte;
+              Chord:=(Chord shl 8) or GetByte;
+              Chord:=(Chord shl 8) or GetByte;
+              case MicroEventIndex mod 4 of 
+               0: Chord:=Chord shl 0;
+               1: Chord:=Chord shl 2;
+               2: Chord:=Chord shl 4;
+               3: Chord:=Chord shl 6;
+              end;
+              CurrentButtons:=(Chord shr 30) and $03;
+              LedRequest:=Currentbuttons;
+              case CurrentButtons of 
+               0:
+                 ButtonMessage:='Released    ';
+               1:
+                 ButtonMessage:='A down      ';
+               2:
+                 ButtonMessage:='B down      ';
+               3:
+                 ButtonMessage:='A and B down';
+               else
+                ButtonMessage:='????????????';
+              end;
+              LoggingOutput(Format('%s micro:bit ble %s event number %03.3d %s',[LogMarker,AddressString,MicroBitPeripheral^.ButtonCounter,ButtonMessage]));
+              if ((Chord shr 30) and $03) = 0 then
                begin
-                if (Chord and Mask) = 0 then
+                Mask:=$30000000;
+                Keep:=$c0000000;
+                while Mask <> 0 do
                  begin
-                  Chord:=Chord and Keep;
-                  break;
-                 end
+                  if (Chord and Mask) = 0 then
+                   begin
+                    Chord:=Chord and Keep;
+                    break;
+                   end
+                  else
+                   begin
+                    Mask:=Mask shr 2;
+                    Keep:=(Keep shr 2) or $c0000000;
+                   end;
+                 end;
+                ChordDiscarded:=True;
+                //              if MicroBitPeripheral^.Locomotive = nil then
+                //               begin
+                //                if (Length(MicroBitPeripheral^.SelectionString) < 4) and IsChord([$1]) then
+                //                 begin
+                //                  MicroBitPeripheral^.SelectionString:=MicroBitPeripheral^.SelectionString + 'A';
+                //                  AssignOperator(MicroBitPeripheral);
+                //                  ChordDiscarded:=False;
+                //                 end;
+                //                if (Length(MicroBitPeripheral^.SelectionString) < 4) and IsChord([$2]) then
+                //                 begin
+                //                  MicroBitPeripheral^.SelectionString:=MicroBitPeripheral^.SelectionString + 'B';
+                //                  AssignOperator(MicroBitPeripheral);
+                //                  ChordDiscarded:=False;
+                //                 end;
+                //                if (Length(MicroBitPeripheral^.SelectionString) < 4) and IsChord([$3]) then
+                //                 begin
+                //                  MicroBitPeripheral^.SelectionString:='????';
+                //                  AssignOperator(MicroBitPeripheral);
+                //                  ChordDiscarded:=False;
+                //                 end;
+                //               end
+                //              else
+                begin
+                 if IsChord([$2,$3,$2,$3,$2,$3,$2]) then
+                  begin
+                   if MicroBitPeripheral^.Locomotive = nil then
+                    begin
+                     AssignOperator(MicroBitPeripheral);
+                     ChordDiscarded:=False;
+                    end;
+                  end;
+                 if IsChord([$1,$3,$2]) then
+                  begin
+                   MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter:=0;
+                   ChordDiscarded:=False;
+                  end;
+                 if IsChord([$2,$3,$1]) then
+                  begin
+                   MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter:=0;
+                   ChordDiscarded:=False;
+                   SystemRestart(0);
+                  end;
+                 if IsChord([$2]) then
+                  begin
+                   Inc(MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter,1);
+                   ChordDiscarded:=False;
+                  end;
+                 if IsChord([$1]) then
+                  begin
+                   Dec(MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter,1);
+                   ChordDiscarded:=False;
+                  end;
+                end;
+                if ChordDiscarded then
+                 ChordDiscardedString:='discarded'
                 else
-                 begin
-                  Mask:=Mask shr 2;
-                  Keep:=(Keep shr 2) or $c0000000;
-                 end;
+                 ChordDiscardedString:='ok';
+                Log(Format('**** micro:bit ble %s chord %04.4x %s high water %d',[Addressstring,Chord,ChordDiscardedString,HighWater]));
                end;
-              ChordDiscarded:=True;
-              if MicroBitPeripheral^.Locomotive = nil then
-               begin
-                if (Length(MicroBitPeripheral^.SelectionString) < 4) and IsChord([$1]) then
-                 begin
-                  MicroBitPeripheral^.SelectionString:=MicroBitPeripheral^.SelectionString + 'A';
-                  AssignOperator(MicroBitPeripheral);
-                  ChordDiscarded:=False;
-                 end;
-                if (Length(MicroBitPeripheral^.SelectionString) < 4) and IsChord([$2]) then
-                 begin
-                  MicroBitPeripheral^.SelectionString:=MicroBitPeripheral^.SelectionString + 'B';
-                  AssignOperator(MicroBitPeripheral);
-                  ChordDiscarded:=False;
-                 end;
-                if (Length(MicroBitPeripheral^.SelectionString) < 4) and IsChord([$3]) then
-                 begin
-                  MicroBitPeripheral^.SelectionString:='????';
-                  AssignOperator(MicroBitPeripheral);
-                  ChordDiscarded:=False;
-                 end;
-               end
-              else
-               begin
-                if IsChord([$1,$3,$2]) then
-                 begin
-                  MicroBitPeripheral^.Locomotive^.Velocity:=0;
-                  ChordDiscarded:=False;
-                 end;
-                if IsChord([$2]) then
-                 begin
-                  Inc(MicroBitPeripheral^.Locomotive^.Velocity,1);
-                  ChordDiscarded:=False;
-                 end;
-                if IsChord([$1]) then
-                 begin
-                  Dec(MicroBitPeripheral^.Locomotive^.Velocity,1);
-                  ChordDiscarded:=False;
-                 end;
-               end;
-              if ChordDiscarded then
-               ChordDiscardedString:='discarded'
-              else
-               ChordDiscardedString:='ok';
-              Log(Format('**** micro:bit ble %s chord %04.4x %s',[Addressstring,Chord,ChordDiscardedString]));
              end;
            end;
          end;
@@ -1019,7 +1366,9 @@ begin
  StartLogging;
  Log('prototype-microbit-as-ultibo-peripheral');
 
+ BeginThread(@LedLoop,Nil,LedLoopHandle,THREAD_STACK_DEFAULT_SIZE);
  BeginThread(@KeyboardLoop,Nil,KeyboardLoopHandle,THREAD_STACK_DEFAULT_SIZE);
+ // BeginThread(@SelfTestLoop,Nil,SelfTestLoopHandle,THREAD_STACK_DEFAULT_SIZE);
  Help;
 
  SetLength(MicroBitPeripherals,0);
@@ -1030,10 +1379,13 @@ begin
    with Locomotives[High(Locomotives)] do
     begin
      Id:=I;
-     Velocity:=0;
+     CommandedThrottle:=0;
+     ButtonThrottleCounter:=0;
      Peripheral:=Nil;
+     PwmLoopHandle:=INVALID_HANDLE_VALUE;
     end;
   end;
+ BeginThread(@LocomotivePwmLoop,@Locomotives[0],Locomotives[0].PwmLoopHandle,THREAD_STACK_DEFAULT_SIZE);
  EndOfScan;
 
  if IsBlueToothAvailable then
@@ -1053,6 +1405,11 @@ begin
  Log('Init complete');
  ScanCycleCounter:=0;
  ReadByteCounter:=0;
+ HighWater:=-1;
+ if SysUtils.GetEnvironmentVariable('RUN_DEMO_OPERATIONS') = '1' then
+  BeginThread(@DemoLoop,Nil,DemoLoopHandle,THREAD_STACK_DEFAULT_SIZE)
+ else
+  BeginThread(@ButtonThrottleLoop,Nil,ButtonThrottleLoopHandle,THREAD_STACK_DEFAULT_SIZE);
  while True do
   begin
    ReadBackLog:=0;

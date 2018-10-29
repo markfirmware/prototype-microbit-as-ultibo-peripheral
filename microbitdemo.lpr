@@ -63,7 +63,6 @@ type
   ButtonCounter:LongWord;
   TimeAtLastReception:LongWord;
   CarrierLost:Boolean;
-  //  SelectionString:String;
   Locomotive:PLocomotive;
  end;
  TLocomotive = record
@@ -284,7 +283,6 @@ procedure MicroBitPeripheralReset(MicroBitPeripheral:PMicroBitPeripheral;Message
 begin
  Log(Message);
  MicroBitPeripheral^.ButtonCounter:=0;
- // MicroBitPeripheral^.SelectionString:='';
  if MicroBitPeripheral^.Locomotive <> nil then
   begin
    MicroBitPeripheral^.Locomotive^.Peripheral := Nil;
@@ -383,13 +381,11 @@ begin
    // Line:=Format(LineFormat,[dBm(Last.Rssi),Count,Key,Last.Data]);
    with MicroBitPeripherals[I] do
     begin
-     //   if ButtonCounter <= 7 then
-     //    Line:=Format('%s selecting locomotive ... press a or b ... %s',[AddressString,SelectionString])
-     //   else
      if Locomotive <> nil then
       Line:=Format('%s operating locomotive %02.2d',[AddressString,Locomotive^.Id])
      else
-      Line:=Format('%s cannot engage - must restart micro:bit to engage with this device',[AddressString]);
+      //      Line:=Format('%s cannot engage - must restart micro:bit to engage with this device',[AddressString]);
+      Line:=Format('%s ...',[AddressString]);
      Console2WriteLn(Line);
     end;
   end;
@@ -721,7 +717,7 @@ begin
      end;
     while ButtonThrottleCounter <> 0 do
      begin
-      SetThrottle(Trunc(0.005*ButtonThrottleCounter*PwmRange));
+      SetThrottle(Trunc(0.0005*ButtonThrottleCounter*PwmRange));
       Sleep(10);
      end;
    end;
@@ -788,8 +784,8 @@ var
  InterruptLatched:Boolean;
  IdleCounter:Integer;
 const 
- Activity = 1;
- Power = 2;
+ Activity = 0;
+ Power = 1;
 
 function Interrupted:Boolean;
 begin
@@ -844,11 +840,10 @@ begin
      if LedRequest <> 0 then
       begin
        IdleCounter:=0;
-       ActivityLedOn;
-       //     if (LedRequest and $1) <> 0 then
-       //      ActivityLedOn
-       //     else
-       //      ActivityLedOff;
+       if (LedRequest and $1) <> 0 then
+        ActivityLedOn
+       else
+        ActivityLedOff;
        if (LedRequest and $2) <> 0 then
         PowerLedOn
        else
@@ -856,6 +851,8 @@ begin
       end
      else
       begin
+       ActivityLedOff;
+       PowerLedOff;
        Inc(IdleCounter);
        if IdleCounter > 5 then
         InterruptLatched:=False;
@@ -928,7 +925,6 @@ begin
      AddressString:=NewAddressString;
      ButtonCounter:=0;
      CarrierLost:=False;
-     //     SelectionString:='';
      Locomotive:=Nil;
     end;
    Log(Format('**** micro:bit ble %s newly detected',[NewAddressString]));
@@ -942,11 +938,9 @@ begin
  with ThisPeripheral^ do
   for I:=0 to High(Locomotives) do
    with Locomotives[I] do
-    //  if (Peripheral = nil) and (SelectionString = ButtonStringForInteger(Id)) then
-    if (Peripheral = nil) then
+    if Peripheral = nil then
      begin
       Peripheral:=ThisPeripheral;
-      //    SelectionString:='';
       Locomotive:=@Locomotives[I];
       break;
      end;
@@ -1098,6 +1092,10 @@ begin
  Result:=Event[GetByteIndex];
  Inc(GetByteIndex);
 end;
+const 
+ A = 1;
+ B = 2;
+ Both = 3;
 function IsChord(Pattern:Array of Byte):Boolean;
 var 
  I:Integer;
@@ -1107,6 +1105,7 @@ begin
  Result:=(X shr 30) and $03;
 end;
 begin
+ // LoggingOutput(Format('IsChord',[]));
  Result:=True;
  X:=Chord;
  if Bits <> 0 then
@@ -1228,7 +1227,7 @@ begin
             if MicroEventIndex > HighWater then
              begin
               HighWater:=MicroEventIndex;
-              Log(Format('high water now %ds',[HighWater]));
+              Log(Format('high water now %d',[HighWater]));
              end;
             //Log(Format('counter %d new %d index %d %s',[MicroBitPeripheral^.ButtonCounter,NewButtonCounter,MicroEventIndex,S]));
             if MicroEventIndex >= 80 then
@@ -1251,7 +1250,12 @@ begin
                3: Chord:=Chord shl 6;
               end;
               CurrentButtons:=(Chord shr 30) and $03;
-              LedRequest:=Currentbuttons;
+              if CurrentButtons = $01 then
+               LedRequest:=$02
+              else if CurrentButtons = $02 then
+                    LedRequest:=$01
+              else
+               LedRequest:=Currentbuttons;
               case CurrentButtons of 
                0:
                  ButtonMessage:='Released    ';
@@ -1283,30 +1287,9 @@ begin
                    end;
                  end;
                 ChordDiscarded:=True;
-                //              if MicroBitPeripheral^.Locomotive = nil then
-                //               begin
-                //                if (Length(MicroBitPeripheral^.SelectionString) < 4) and IsChord([$1]) then
-                //                 begin
-                //                  MicroBitPeripheral^.SelectionString:=MicroBitPeripheral^.SelectionString + 'A';
-                //                  AssignOperator(MicroBitPeripheral);
-                //                  ChordDiscarded:=False;
-                //                 end;
-                //                if (Length(MicroBitPeripheral^.SelectionString) < 4) and IsChord([$2]) then
-                //                 begin
-                //                  MicroBitPeripheral^.SelectionString:=MicroBitPeripheral^.SelectionString + 'B';
-                //                  AssignOperator(MicroBitPeripheral);
-                //                  ChordDiscarded:=False;
-                //                 end;
-                //                if (Length(MicroBitPeripheral^.SelectionString) < 4) and IsChord([$3]) then
-                //                 begin
-                //                  MicroBitPeripheral^.SelectionString:='????';
-                //                  AssignOperator(MicroBitPeripheral);
-                //                  ChordDiscarded:=False;
-                //                 end;
-                //               end
-                //              else
                 begin
-                 if IsChord([$2,$3,$2,$3,$2,$3,$2]) then
+                 LoggingOutput(Format('analyzing chord %08.8x',[Chord]));
+                 if IsChord([A,Both,A,Both,A,Both,A]) then
                   begin
                    if MicroBitPeripheral^.Locomotive = nil then
                     begin
@@ -1314,25 +1297,29 @@ begin
                      ChordDiscarded:=False;
                     end;
                   end;
-                 if IsChord([$1,$3,$2]) then
+                 if IsChord([A,Both,B]) then
                   begin
-                   MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter:=0;
+                   if MicroBitPeripheral^.Locomotive <> nil then
+                    MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter:=0;
                    ChordDiscarded:=False;
                   end;
-                 if IsChord([$2,$3,$1]) then
+                 if IsChord([B,Both,A]) then
                   begin
-                   MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter:=0;
+                   if MicroBitPeripheral^.Locomotive <> nil then
+                    MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter:=0;
                    ChordDiscarded:=False;
                    SystemRestart(0);
                   end;
-                 if IsChord([$2]) then
+                 if IsChord([B]) then
                   begin
-                   Inc(MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter,1);
+                   if MicroBitPeripheral^.Locomotive <> nil then
+                    Inc(MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter,1);
                    ChordDiscarded:=False;
                   end;
-                 if IsChord([$1]) then
+                 if IsChord([A]) then
                   begin
-                   Dec(MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter,1);
+                   if MicroBitPeripheral^.Locomotive <> nil then
+                    Dec(MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter,1);
                    ChordDiscarded:=False;
                   end;
                 end;

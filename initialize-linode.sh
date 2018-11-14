@@ -12,6 +12,9 @@ apt-get update
 apt-get -y install docker-ce
 usermod -aG docker $(whoami)
 
+curl https://nim-lang.org/choosenim/init.sh -sSf | sh -s -- -y
+echo 'export PATH=/root/.nimble/bin:$PATH' >> ~/.bashrc
+
 git config --global user.name markfirmware
 git config --global user.email markfirmware@users.noreply.github.com
 

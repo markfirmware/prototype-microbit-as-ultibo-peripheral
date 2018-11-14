@@ -1,0 +1,3 @@
+#!/bin/bash
+
+docker build -t markfirmware/ultibo -f ultibo.dockerfile .

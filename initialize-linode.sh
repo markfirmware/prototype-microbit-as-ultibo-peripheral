@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 
+rm -f /etc/apt/sources.list.d/docker.list
 apt-get update
 apt-get -y dist-upgrade
 apt-get -y install git tmux apt-transport-https wget
@@ -18,4 +19,8 @@ cat > .exrc << __EOF__
 set noai ic
 __EOF__
 
-set -x
+mkdir -p ~/github.com/markfirmware
+cd ~/github.com/markfirmware
+git clone https://github.com/markfirmware/prototype-microbit-as-ultibo-peripheral
+cd ~/github.com/markfirmware/prototype-microbit-as-ultibo-peripheral
+git checkout linode

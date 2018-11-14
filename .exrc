@@ -1,0 +1,1 @@
+set noai ic

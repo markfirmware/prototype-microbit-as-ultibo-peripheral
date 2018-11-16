@@ -15,6 +15,13 @@ usermod -aG docker $(whoami)
 curl https://nim-lang.org/choosenim/init.sh -sSf | sh -s -- -y
 echo 'export PATH=/root/.nimble/bin:$PATH' >> ~/.bashrc
 
+mkdir -p bin                                                                            && \
+echo 'export PATH=/root/bin:$PATH' >> ~/.bashrc                                         && \
+cd bin                                                                                  && \
+wget https://github.com/elm/compiler/releases/download/0.19.0/binaries-for-linux.tar.gz && \
+tar zxf binaries-for-linux.tar.gz                                                       && \
+rm binaries-for-linux.tar.gz
+
 git config --global user.name markfirmware
 git config --global user.email markfirmware@users.noreply.github.com
 

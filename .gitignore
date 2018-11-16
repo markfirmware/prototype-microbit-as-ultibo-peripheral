@@ -4,4 +4,6 @@
 *.log
 *.o
 *.ppu
+elmspa/index.html
+elm-stuff/
 release/

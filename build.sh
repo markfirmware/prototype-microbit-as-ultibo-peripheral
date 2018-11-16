@@ -13,6 +13,11 @@ then
     CONF=RPI3
 fi
 case $CONF in
+QEMUVPB)
+    PROC=QEMUVPB
+    ARCH=ARMV7a
+    KERNEL=kernel.bin
+    ;;
 RPI)
     PROC=RPIB
     ARCH=ARMV6

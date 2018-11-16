@@ -2,7 +2,7 @@ FROM debian:stretch
 
 WORKDIR /root
 
-RUN apt-get update && apt-get -y dist-upgrade && apt-get -y install curl qemu-system-arm unzip wget build-essential
+RUN apt-get update && apt-get -y dist-upgrade && apt-get -y install curl less qemu-system-arm unzip vim wget build-essential
 
 RUN curl https://nim-lang.org/choosenim/init.sh -sSf | sh -s -- -y && \
     echo 'export PATH=/root/.nimble/bin:$PATH' >> ~/.bashrc

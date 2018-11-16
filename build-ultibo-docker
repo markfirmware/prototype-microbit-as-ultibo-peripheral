@@ -1,3 +1,4 @@
 #!/bin/bash
 
 docker build -t markfirmware/ultibo -f ultibo.dockerfile .
+docker save markfirmware/ultibo | gzip > ultibo.dockerimage.tgz

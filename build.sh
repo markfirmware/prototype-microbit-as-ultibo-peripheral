@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+SHORT_VERSION=$(./get-commit-version.sh -s)
+cat > version.h << _EOF_
+#define SHORT_VERSION "$SHORT_VERSION"
+_EOF_
+
 LPR=$1
 if [[ $LPR == "" ]]
 then

@@ -63,7 +63,9 @@ type
   ButtonCounter:LongWord;
   TimeAtLastReception:LongWord;
   CarrierLost:Boolean;
-  Locomotive:PLocomotive;
+  AssignedLocomotive:PLocomotive;
+  AsciiMessage:String;
+  NewestAsciiMessage:String;
  end;
  TLocomotive = record
   Id:Integer;
@@ -74,10 +76,10 @@ type
  end;
 
 var 
- Console1,Console2,Console3:TWindowHandle;
+ Console1:TWindowHandle;
  LedRequest:Integer;
  MicroBitPeripherals:Array of TMicroBitPeripheral;
- Locomotives:Array of TLocomotive;
+ Locomotive:TLocomotive;
  ScanRxCount:Integer;
  BluetoothUartDeviceDescription:String;
  ScanCycleCounter:LongWord;
@@ -283,12 +285,14 @@ procedure MicroBitPeripheralReset(MicroBitPeripheral:PMicroBitPeripheral;Message
 begin
  Log(Message);
  MicroBitPeripheral^.ButtonCounter:=0;
- if MicroBitPeripheral^.Locomotive <> nil then
+ if MicroBitPeripheral^.AssignedLocomotive <> nil then
   begin
-   MicroBitPeripheral^.Locomotive^.Peripheral := Nil;
-   MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter := 0;
-   MicroBitPeripheral^.Locomotive^.CommandedThrottle := 0;
-   MicroBitPeripheral^.Locomotive:=Nil;
+   MicroBitPeripheral^.AssignedLocomotive^.Peripheral := Nil;
+   MicroBitPeripheral^.AssignedLocomotive^.ButtonThrottleCounter := 0;
+   MicroBitPeripheral^.AssignedLocomotive^.CommandedThrottle := 0;
+   MicroBitPeripheral^.AssignedLocomotive:=Nil;
+   MicroBitPeripheral^.AsciiMessage:='';
+   MicroBitPeripheral^.NewestAsciiMessage:='';
   end;
 end;
 
@@ -309,9 +313,8 @@ begin
     else if CarrierLost and (LongWord(Now - TimeAtLastReception) >= 2*1000) then
           begin
            MicroBitPeripheralReset(@MicroBitPeripherals[I],Format('**** micro:bit ble %s carrier lost - removed from active list',[AddressString]));
-           for J:=0 to High(Locomotives) do
-            if Locomotives[J].Peripheral = @MicroBitPeripherals[I] then
-             Locomotives[J].Peripheral:=Nil;
+           if Locomotive.Peripheral = @MicroBitPeripherals[I] then
+            Locomotive.Peripheral:=Nil;
            for J:=I + 1 to High(MicroBitPeripherals) do
             MicroBitPeripherals[J - 1]:=MicroBitPeripherals[J];
            SetLength(MicroBitPeripherals,Length(MicroBitPeripherals) - 1);
@@ -319,28 +322,16 @@ begin
    end;
 end;
 
-function ButtonStringForInteger(Id:Integer):String;
-var 
- I:Integer;
+procedure Console1WriteLn(Line:string);
 begin
- Result:='';
- for I:=3 downto 0 do
-  if ((Id shr I) and $01) = 0 then
-   Result:=Result + 'A'
-  else
-   Result:=Result + 'B';
+ ConsoleWindowWrite(Console1,Line);
+ ConsoleWindowClearEx(Console1,ConsoleWindowGetX(Console1),ConsoleWindowGetY(Console1),ConsoleWindowGetMaxX(Console1),ConsoleWindowGetY(Console1),False);
+ ConsoleWindowWriteLn(Console1,'');
 end;
 
-procedure Console2WriteLn(Line:string);
+procedure Console1SetForecolor(Color:LongWord);
 begin
- ConsoleWindowWrite(Console2,Line);
- ConsoleWindowClearEx(Console2,ConsoleWindowGetX(Console2),ConsoleWindowGetY(Console2),ConsoleWindowGetMaxX(Console2),ConsoleWindowGetY(Console2),False);
- ConsoleWindowWriteLn(Console2,'');
-end;
-
-procedure Console2SetForecolor(Color:LongWord);
-begin
- ConsoleWindowSetForecolor(Console2,Color);
+ ConsoleWindowSetForecolor(Console1,Color);
 end;
 
 procedure EndOfScan;
@@ -349,50 +340,49 @@ var
  Line:string;
  MotionString,OperatorString:string;
 begin
- Console2SetForecolor(COLOR_ORANGE);
+ Console1SetForecolor(COLOR_ORANGE);
  CullMicroBitPeripherals;
- ConsoleWindowSetXY(Console2,1,1);
- Console2WriteLn(Format('Ultibo locomotives implemented by this %s',[BoardTypeToString(BoardGetType)]));
- for I:=0 to High(Locomotives) do
-  with Locomotives[I] do
-   begin
-    if CommandedThrottle = 0 then
-     Console2SetForecolor(COLOR_WHITE)
-    else if CommandedThrottle > 0 then
-          Console2SetForecolor(COLOR_GREEN)
-    else
-     Console2SetForecolor(COLOR_RED);
-    MotionString:=Format('%4d%% throttle',[CommandedThrottle]);
-    if Peripheral = nil then
-     begin
-      Console2SetForecolor(COLOR_GRAY);
-      OperatorString:=Format('Available (select %s)',[ButtonStringForInteger(Id)]);
-     end
-    else
-     OperatorString:=Format('micro:bit operator %s',[Peripheral^.AddressString]);
-    Console2WriteLn(Format('%02.2d %-19s %s',[Id,MotionString,OperatorString]))
-   end;
- Console2SetForecolor(COLOR_YELLOW);
- Console2WriteLn(Format('',[]));
- Console2WriteLn(Format('micro:bit operators detected',[]));
+ ConsoleWindowSetXY(Console1,1,1);
+ Console1WriteLn(Format('%s',[BoardTypeToString(BoardGetType)]));
+ with Locomotive do
+  begin
+   if CommandedThrottle = 0 then
+    Console1SetForecolor(COLOR_WHITE)
+   else if CommandedThrottle > 0 then
+         Console1SetForecolor(COLOR_GREEN)
+   else
+    Console1SetForecolor(COLOR_RED);
+   MotionString:=Format('%4d%% throttle',[CommandedThrottle]);
+   if Peripheral = nil then
+    begin
+     Console1SetForecolor(COLOR_GRAY);
+     OperatorString:=Format('Available (select %s)',['chord aaaa']);
+    end
+   else
+    OperatorString:=Format('micro:bit operator %s',[Peripheral^.AddressString]);
+   Console1WriteLn(Format('%02.2d %-19s %s',[Id,MotionString,OperatorString]))
+  end;
+ Console1SetForecolor(COLOR_YELLOW);
+ Console1WriteLn(Format('',[]));
+ Console1WriteLn(Format('micro:bit operators detected',[]));
  for I:=0 to High(MicroBitPeripherals) do
   begin
    // LineFormat:=Format('%%7s %%%dd %%s %%s',[CounterWidth]);
    // Line:=Format(LineFormat,[dBm(Last.Rssi),Count,Key,Last.Data]);
    with MicroBitPeripherals[I] do
     begin
-     if Locomotive <> nil then
-      Line:=Format('%s operating locomotive %02.2d',[AddressString,Locomotive^.Id])
+     if AssignedLocomotive <> nil then
+      Line:=Format('%s operating locomotive %02.2d',[AddressString,AssignedLocomotive^.Id])
      else
       //      Line:=Format('%s cannot engage - must restart micro:bit to engage with this device',[AddressString]);
       Line:=Format('%s ...',[AddressString]);
-     Console2WriteLn(Line);
+     Console1WriteLn(Line);
     end;
   end;
- Console2SetForecolor(COLOR_WHITE);
- Console2WriteLn(Format('',[]));
- Console2WriteLn(Format('screen refreshed after every ble scan interval (%5.3f seconds) - (scan window is %5.3f seconds)',[ScanInterval,ScanWindow]));
- ConsoleWindowClearEx(Console2,ConsoleWindowGetX(Console2),ConsoleWindowGetY(Console2),ConsoleWindowGetMaxX(Console2),ConsoleWindowGetMaxY(Console2),False);
+ Console1SetForecolor(COLOR_WHITE);
+ Console1WriteLn(Format('',[]));
+ Console1WriteLn(Format('screen refreshed after every ble scan interval (%5.3f seconds) - (scan window is %5.3f seconds)',[ScanInterval,ScanWindow]));
+ ConsoleWindowClearEx(Console1,ConsoleWindowGetX(Console1),ConsoleWindowGetY(Console1),ConsoleWindowGetMaxX(Console1),ConsoleWindowGetMaxY(Console1),False);
 end;
 
 function EventReadFirstByte:Byte;
@@ -604,7 +594,7 @@ begin
  LOGGING_INCLUDE_COUNTER:=False;
  LOGGING_INCLUDE_TICKCOUNT:=True;
  CONSOLE_REGISTER_LOGGING:=True;
- CONSOLE_LOGGING_POSITION:=CONSOLE_POSITION_BOTTOMRIGHT;
+ CONSOLE_LOGGING_POSITION:=CONSOLE_POSITION_RIGHT;
  LoggingConsoleDeviceAdd(ConsoleDeviceGetDefault);
  LoggingDeviceSetDefault(LoggingDeviceFindByType(LOGGING_TYPE_CONSOLE));
 end;
@@ -682,7 +672,7 @@ end;
 
 procedure SetThrottle(X:Integer);
 begin
- Locomotives[0].CommandedThrottle:=X;
+ Locomotive.CommandedThrottle:=X;
 end;
 
 procedure SleepPhase(RequestedPhase:Integer);
@@ -700,7 +690,7 @@ var
 begin
  Result:=0;
  SleepPhase(0);
- with Locomotives[0] do
+ with Locomotive do
   while True do
    begin
     while ButtonThrottleCounter = 0 do
@@ -925,25 +915,21 @@ begin
      AddressString:=NewAddressString;
      ButtonCounter:=0;
      CarrierLost:=False;
-     Locomotive:=Nil;
+     AssignedLocomotive:=Nil;
+     AsciiMessage:='';
+     NewestAsciiMessage:='';
     end;
    Log(Format('**** micro:bit ble %s newly detected',[NewAddressString]));
   end;
 end;
 
 procedure AssignOperator(ThisPeripheral:PMicroBitPeripheral);
-var 
- I:Integer;
 begin
- with ThisPeripheral^ do
-  for I:=0 to High(Locomotives) do
-   with Locomotives[I] do
-    if Peripheral = nil then
-     begin
-      Peripheral:=ThisPeripheral;
-      Locomotive:=@Locomotives[I];
-      break;
-     end;
+ if Locomotive.Peripheral = nil then
+  begin
+   Locomotive.Peripheral:=ThisPeripheral;
+   ThisPeripheral^.AssignedLocomotive:=@Locomotive
+  end;
 end;
 
 function SelfTestLoop(Parameter:Pointer):PtrInt;
@@ -1087,6 +1073,10 @@ var
  ChordDiscarded:Boolean;
  ChordDiscardedString:String;
  Mask,Keep:LongWord;
+ PeripheralBindId:LongWord;
+ PeripheralFlags:Byte;
+ NewAsciiMessage:String;
+ AsciiOffset:Integer;
 function GetByte:Byte;
 begin
  Result:=Event[GetByteIndex];
@@ -1095,7 +1085,6 @@ end;
 const 
  A = 1;
  B = 2;
- Both = 3;
 function IsChord(Pattern:Array of Byte):Boolean;
 var 
  I:Integer;
@@ -1187,6 +1176,9 @@ begin
        end
  else if (MainType = $ff) and (AsWord(MfrHi,MfrLo) = Word(ManufacturerTesting)) and (SignatureLo = $78) and (SignatureHi = $f3) and (SignatureAnother = $c7) then
        begin
+       end
+ else if (MainType = $ff) and (AsWord(MfrHi,MfrLo) = Word(ManufacturerTesting)) and (SignatureLo = $78) and (SignatureHi = $f3) and (SignatureAnother = $c8) then
+       begin
         MicroBitPeripheral:=FindOrMakeMicroBitPeripheral(AddressString);
         MicroBitPeripheral^.TimeAtLastReception:=GetTickCount;
         if MicroBitPeripheral^.CarrierLost then
@@ -1195,9 +1187,34 @@ begin
           Log(Format('**** micro:bit ble %s carrier restored',[AddressString]));
          end;
         GetByteIndex:=21;
+        PeripheralBindId:=GetByte;
+        PeripheralBindId:=(PeripheralBindId shl 8) or GetByte;
+        PeripheralBindId:=(PeripheralBindId shl 8) or GetByte;
+        PeripheralFlags:=GetByte;
         CounterByte:=GetByte;
         if (CounterByte and $80) = 0 then
-         NewButtonCounter:=CounterByte
+         begin
+          NewButtonCounter:=CounterByte;
+          AsciiOffset:=GetByteIndex + (CounterByte + 3) div 4;
+          while AsciiOffset <= High(Event) do
+           begin
+            if Event[AsciiOffset] = 0 then
+             break;
+            NewAsciiMessage:=NewAsciiMessage + Char(Event[AsciiOffset]);
+            Inc(AsciiOffset);
+           end;
+          if (NewAsciiMessage <> '') and ( MicroBitPeripheral^.AsciiMessage = '') then
+           begin
+            MicroBitPeripheral^.NewestAsciiMessage:=NewAsciiMessage;
+            MicroBitPeripheral^.AsciiMessage:=NewAsciiMessage;
+            Log(Format('AsciiMessage <%s>',[NewAsciiMessage]));
+           end
+          else if NewAsciiMessage <> MicroBitPeripheral^.NewestAsciiMessage then
+                begin
+                 MicroBitPeripheral^.NewestAsciiMessage:=NewAsciiMessage;
+                 Log(Format('NewestAsciiMessage <%s>',[NewAsciiMessage]));
+                end;
+         end
         else
          begin
           NewbuttonCounter:=(MicroBitPeripheral^.ButtonCounter and $ffffff80) or (CounterByte and $7f);
@@ -1238,7 +1255,7 @@ begin
              end
             else
              begin
-              GetByteIndex:=22 + MicroEventIndex div 4;
+              GetByteIndex:=22 + 4 + MicroEventIndex div 4;
               Chord:=GetByte;
               Chord:=(Chord shl 8) or GetByte;
               Chord:=(Chord shl 8) or GetByte;
@@ -1263,8 +1280,6 @@ begin
                  ButtonMessage:='A down      ';
                2:
                  ButtonMessage:='B down      ';
-               3:
-                 ButtonMessage:='A and B down';
                else
                 ButtonMessage:='????????????';
               end;
@@ -1289,37 +1304,37 @@ begin
                 ChordDiscarded:=True;
                 begin
                  LoggingOutput(Format('analyzing chord %08.8x',[Chord]));
-                 if IsChord([A,Both,A,Both,A,Both,A]) then
+                 if IsChord([A,A,A,A]) then
                   begin
-                   if MicroBitPeripheral^.Locomotive = nil then
+                   if MicroBitPeripheral^.AssignedLocomotive = nil then
                     begin
                      AssignOperator(MicroBitPeripheral);
                      ChordDiscarded:=False;
                     end;
                   end;
-                 if IsChord([A,Both,B]) then
+                 if IsChord([A,B]) then
                   begin
-                   if MicroBitPeripheral^.Locomotive <> nil then
-                    MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter:=0;
+                   if MicroBitPeripheral^.AssignedLocomotive <> nil then
+                    MicroBitPeripheral^.AssignedLocomotive^.ButtonThrottleCounter:=0;
                    ChordDiscarded:=False;
                   end;
-                 if IsChord([B,Both,A]) then
+                 if IsChord([B,A]) then
                   begin
-                   if MicroBitPeripheral^.Locomotive <> nil then
-                    MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter:=0;
+                   if MicroBitPeripheral^.AssignedLocomotive <> nil then
+                    MicroBitPeripheral^.AssignedLocomotive^.ButtonThrottleCounter:=0;
                    ChordDiscarded:=False;
                    SystemRestart(0);
                   end;
                  if IsChord([B]) then
                   begin
-                   if MicroBitPeripheral^.Locomotive <> nil then
-                    Inc(MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter,1);
+                   if MicroBitPeripheral^.AssignedLocomotive <> nil then
+                    Inc(MicroBitPeripheral^.AssignedLocomotive^.ButtonThrottleCounter,1);
                    ChordDiscarded:=False;
                   end;
                  if IsChord([A]) then
                   begin
-                   if MicroBitPeripheral^.Locomotive <> nil then
-                    Dec(MicroBitPeripheral^.Locomotive^.ButtonThrottleCounter,1);
+                   if MicroBitPeripheral^.AssignedLocomotive <> nil then
+                    Dec(MicroBitPeripheral^.AssignedLocomotive^.ButtonThrottleCounter,1);
                    ChordDiscarded:=False;
                   end;
                 end;
@@ -1339,15 +1354,10 @@ var
  I:Integer;
 
 begin
- Console1 := ConsoleWindowCreate(ConsoleDeviceGetDefault,CONSOLE_POSITION_TOPRIGHT,True);
- Console2 := ConsoleWindowCreate(ConsoleDeviceGetDefault,CONSOLE_POSITION_TOPLEFT,False);
- Console3 := ConsoleWindowCreate(ConsoleDeviceGetDefault,CONSOLE_POSITION_BOTTOMLEFT,False);
- ConsoleWindowSetBackcolor(Console2,COLOR_BLACK);
- ConsoleWindowSetForecolor(Console2,COLOR_YELLOW);
- ConsoleWindowSetBackcolor(Console3,COLOR_CYAN);
- ConsoleWindowSetForecolor(Console3,COLOR_WHITE);
- ConsoleWindowClear(Console2);
- ConsoleWindowClear(Console3);
+ Console1 := ConsoleWindowCreate(ConsoleDeviceGetDefault,CONSOLE_POSITION_LEFT,False);
+ ConsoleWindowSetBackcolor(Console1,COLOR_BLACK);
+ ConsoleWindowSetForecolor(Console1,COLOR_YELLOW);
+ ConsoleWindowClear(Console1);
 
  RestoreBootFile('default','config.txt');
  StartLogging;
@@ -1359,20 +1369,15 @@ begin
  Help;
 
  SetLength(MicroBitPeripherals,0);
- SetLength(Locomotives,0);
- for I:=1 to 5 do
+ with Locomotive do
   begin
-   SetLength(Locomotives,Length(Locomotives) + 1);
-   with Locomotives[High(Locomotives)] do
-    begin
-     Id:=I;
-     CommandedThrottle:=0;
-     ButtonThrottleCounter:=0;
-     Peripheral:=Nil;
-     PwmLoopHandle:=INVALID_HANDLE_VALUE;
-    end;
+   Id:=1;
+   CommandedThrottle:=0;
+   ButtonThrottleCounter:=0;
+   Peripheral:=Nil;
+   PwmLoopHandle:=INVALID_HANDLE_VALUE;
   end;
- BeginThread(@LocomotivePwmLoop,@Locomotives[0],Locomotives[0].PwmLoopHandle,THREAD_STACK_DEFAULT_SIZE);
+ BeginThread(@LocomotivePwmLoop,@Locomotive,Locomotive.PwmLoopHandle,THREAD_STACK_DEFAULT_SIZE);
  EndOfScan;
 
  if IsBlueToothAvailable then

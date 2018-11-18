@@ -1,8 +1,29 @@
 #!/bin/bash
 
-elm make src/Main.elm
+elm make src/Main.elm --optimize --output=elm.js
 
-rm -f encodedspa*.inc
+uglifyjs elm.js --compress 'pure_funcs="F2,F3,F4,F5,F6,F7,F8,F9,A2,A3,A4,A5,A6,A7,A8,A9",pure_getters,keep_fargs=false,unsafe_comps,unsafe' | uglifyjs --mangle --output=elm.min.js
+
+rm -f index.html
+cat >> index.html << __EOF__
+<html>
+  <head>
+    <script>
+__EOF__
+cat elm.min.js >> index.html
+cat >> index.html << __EOF__
+
+    </script>
+  </head>
+  <body>
+    <div id="elm"/>
+    <script> var app = Elm.Main.init({node: document.getElementById('elm')}); </script>
+    <script> var clipboard = new Clipboard('.copy-button') </script>
+  </body>
+</html>
+__EOF__
+
+rm -f elm.js elm.min.js encodedspa*.inc
 
 FULLSIZE=$(stat -c %s index.html)
 REMAINING=$FULLSIZE

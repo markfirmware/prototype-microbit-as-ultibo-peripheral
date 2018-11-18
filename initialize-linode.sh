@@ -4,7 +4,7 @@ set -e
 rm -f /etc/apt/sources.list.d/docker.list
 apt-get update
 apt-get -y dist-upgrade
-apt-get -y install git tmux apt-transport-https wget
+apt-get -y install aptitude git tmux apt-transport-https wget
 
 echo "deb https://download.docker.com/linux/debian stretch stable" | tee /etc/apt/sources.list.d/docker.list
 wget --quiet --output-document - https://download.docker.com/linux/debian/gpg | apt-key add -
